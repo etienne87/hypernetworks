@@ -15,9 +15,9 @@ def FeedForward(dim, expansion_factor = 4, dropout = 0., dense = nn.Linear):
     return nn.Sequential(
         dense(dim, dim * expansion_factor),
         nn.GELU(),
-        nn.Dropout(dropout),
+        # nn.Dropout(dropout),
         dense(dim * expansion_factor, dim),
-        nn.Dropout(dropout)
+        # nn.Dropout(dropout)
     )
 
 def MLPMixer(*, image_size, patch_size, cin, dim, depth, num_classes, expansion_factor = 4, dropout = 0.):
@@ -32,7 +32,7 @@ def MLPMixer(*, image_size, patch_size, cin, dim, depth, num_classes, expansion_
             PreNormResidual(dim, FeedForward(num_patches, expansion_factor, dropout, chan_first)),
             PreNormResidual(dim, FeedForward(dim, expansion_factor, dropout, chan_last))
         ) for _ in range(depth)],
-        nn.LayerNorm(dim),
-        Reduce('b n c -> b c', 'mean'),
-        nn.Linear(dim, num_classes)
+        #nn.LayerNorm(dim),
+        #Reduce('b n c -> b c', 'mean'),
+        #nn.Linear(dim, num_classes)
     )
