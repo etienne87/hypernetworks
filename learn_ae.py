@@ -9,6 +9,7 @@ import torchvision
 import tqdm
 
 from hypernetwork import HyperNetwork
+from hypernetwork_klozek_et_al import HyperNetworkKlozek
 
 def loader(im_path, w, h):
     im = cv2.imread(im_path)
@@ -34,6 +35,7 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
     std = torch.FloatTensor([0.229, 0.224, 0.225]).to(device)[None,:,None,None]
 
     net = HyperNetwork(3)
+    #net = HyperNetworkKlozek()
     if os.path.exists(save_path) and resume:
         net.load_state_dict(torch.load(save_path))
 
@@ -48,6 +50,7 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
 
                 x = x.to(device)
                 x_in = (x.float()/255.0-mean)/std
+                #x_in = x.float()/255.0
 
                 #mask = (torch.randn_like(x_in).mean(dim=1)>-1)
                 #x_mask = x_in * mask.unsqueeze(1)
@@ -68,6 +71,8 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
                     x_in = (x_in*std+mean)*255.0
                     #x_mask = (x_mask*std+mean)*255.0
                     y = (y*std+mean)*255.0
+                    #x_in = x_in*255
+                    #y = y*255.0
 
                     im_x_in = make_grid(x_in)
                     #im_x_mask = make_grid(x_mask)
