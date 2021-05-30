@@ -54,38 +54,38 @@ class SineLayer(nn.Module):
 
 
 class DynamicSineLayer(nn.Module):
-    def __init__(self, in_features, out_features, in_activations):
+    def __init__(self, in_features, out_features, in_activations, autofuel=False):
         super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
+        self.cin = in_features
+        self.cout = out_features
+        self.total_len = self.cin * self.cout
+        self.omega = nn.Parameter(torch.FloatTensor([1]))
+        if autofuel:
+            self.weight = nn.Sequential(nn.Linear(in_activations, 256, bias=True), nn.LeakyReLU(),
+                                         nn.Linear(256, total_len))
+            self.bias = nn.Sequential(nn.Linear(in_activations, 256, bias=True), nn.LeakyReLU(),
+                                         nn.Linear(256, out_features))
 
-        total_len = in_features*out_features
-        self.weight = nn.Sequential(nn.Linear(in_activations, 256, bias=True), nn.LeakyReLU(),
-                                    nn.Linear(256, total_len))
-
-        self.bias = nn.Sequential(nn.Linear(in_activations, 256, bias=True), nn.LeakyReLU(),
-                                    nn.Linear(256, out_features))
-
-    def forward(self, coords, fuel):
+    def forward_auto_fuel(self, coords, fuel):
         weight = self.weight(fuel).reshape(len(coords), self.in_features, self.out_features)
         bias = self.bias(fuel).unsqueeze(1)
-        return self._forward(coords, weight, bias)
+        return self.forward_weight_and_bias(coords, weight, bias)
 
-    def _forward(self, coords, weight, bias, omega=1):
+    def forward_weight_and_bias(self, coords, weight, bias, omega=1):
         #coords: [B,N,D]
         #weight: [B,D,K]
         #output: [B,N,K]
-        weight *= omega
+        weight = weight * self.omega
         y = torch.bmm(coords, weight) + bias
         return torch.sin(y)
 
 
 class HyperRenderer(nn.Module):
-    def __init__(self, in_activations, out_features, hidden_features=[128]*5, skip_input=0):
+    def __init__(self, in_activations, out_features, hidden_features=[128]*5):
         super().__init__()
         self.out_features = out_features
 
-        last = 2 + skip_input
+        last = 2
         self.layers = []
         for hidden in hidden_features:
             self.layers.append(DynamicSineLayer(last, hidden, in_activations))
@@ -97,6 +97,10 @@ class HyperRenderer(nn.Module):
         self.hidden_features = hidden_features
         self.grid = None
 
+        self.cin_cout = self.get_cin_cout()
+        self.weight_sizes = [a*b for a,b in self.cin_cout]
+        self.bias_sizes = [b for a,b in self.cin_cout]
+
     def set_size(self, x):
         height, width = x.shape[-2:]
         if self.grid is not None and self.grid.shape[-2:] == (height,width):
@@ -105,13 +109,25 @@ class HyperRenderer(nn.Module):
         self.height = height
         self.width = width
 
-    def forward(self, fuel):
+    def get_cin_cout(self):
+        self.cin_cout = []
+        for layer in self.layers:
+            self.cin_cout.append((layer.cin,layer.cout))
+        return self.cin_cout
+
+    def get_weights_total_len(self):
+        return sum([item.total_len for item in self.layers])
+
+    def get_biases_total_len(self):
+        return sum([item.cout for item in self.layers])
+
+    def forward_fuel(self, fuel):
         assert self.grid is not None
         batch_size = fuel.shape[0]
         coords = self.grid[None].repeat([batch_size,1,1])
 
         for layer in self.layers:
-            coords = layer(coords, fuel)
+            coords = layer.forward_auto_fuel(coords, fuel)
 
         b,n,d = coords.shape
         x = coords.view(-1,d)
@@ -120,6 +136,31 @@ class HyperRenderer(nn.Module):
         y = y.permute(0,3,1,2).contiguous()
         return y
 
+    def forward_weights_and_biases(self, x):
+        assert self.grid is not None
+        batch_size = x.shape[0]
+        coords = self.grid[None].repeat([batch_size,1,1])
+
+        weights, biases = self.get_weights_and_biases(x)
+
+        for layer, weight, bias in zip(self.layers, weights, biases):
+            coords = layer.forward_weight_and_bias(coords, weight, bias)
+
+        b,n,d = coords.shape
+        x = coords.view(-1,d)
+        y = self.final_linear(x)
+        y = y.reshape(b,self.height,self.width,self.out_features)
+        y = y.permute(0,3,1,2).contiguous()
+        return y
+
+    def get_weights_and_biases(self, x):
+        b = len(x)
+        x = torch.split(x, self.weight_sizes+self.bias_sizes, dim=1)
+        weights, biases = x[:len(self.layers)], x[len(self.layers):]
+        weights = [weight.view(b,cin,cout) for weight,(cin,cout) in zip(weights,self.cin_cout)]
+        biases = [bias.unsqueeze(1) for bias in biases]
+        return weights, biases
+
 
 
 
@@ -127,29 +168,30 @@ class HyperRenderer(nn.Module):
 class HyperNetwork(nn.Module):
     def __init__(self, cout=3, hyper_hidden=32, hypo_hidden=256, n_layers=2):
         super().__init__()
-        self.hypo = MLPMixer(image_size=128, patch_size=16, cin=3, dim=128, num_classes=hypo_hidden, depth=3)
-        self.hyper = HyperRenderer(hypo_hidden, 3)
+        self.hyper = HyperRenderer(hypo_hidden, 3, [32,64,256,64])
+        total = self.hyper.get_weights_total_len() + self.hyper.get_biases_total_len()
+        self.hypo = MLPMixer(image_size=128, patch_size=16, cin=3, dim=128, num_classes=total, depth=3)
 
     def forward(self, x):
         self.hyper.set_size(x)
-        #TODO: add coordinates
-        # coords = self.grid[None].repeat([batch_size,1,1])
-        # x = torch.cat((x, coords), dim=1)
-        """
-        x = self.hypo[0](x)
-        x = self.hypo[1](x)
-        for i in range(2, len(self.hypo)):
-            x = self.hypo[i](x)
-            #mat-mul/ cross-attention to weights
-            #perceiver style modification of weights
-        """
         x = self.hypo(x)
-        y = self.hyper(x)
+        y = self.hyper.forward_weights_and_biases(x)
         return y
 
 
 
 if __name__ == '__main__':
+    #TODO: add coordinates
+    # coords = self.grid[None].repeat([batch_size,1,1])
+    # x = torch.cat((x, coords), dim=1)
+    """
+    x = self.hypo[0](x)
+    x = self.hypo[1](x)
+    for i in range(2, len(self.hypo)):
+        x = self.hypo[i](x)
+        #mat-mul/ cross-attention to weights
+        #perceiver style modification of weights
+    """
     # hyper = HyperRenderer(100, 3)
     # hyper.set_size(torch.randn(64,64))
     # b,c = 4,100

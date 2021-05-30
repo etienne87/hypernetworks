@@ -32,7 +32,7 @@ def MLPMixer(*, image_size, patch_size, cin, dim, depth, num_classes, expansion_
             PreNormResidual(dim, FeedForward(num_patches, expansion_factor, dropout, chan_first)),
             PreNormResidual(dim, FeedForward(dim, expansion_factor, dropout, chan_last))
         ) for _ in range(depth)],
-        #nn.LayerNorm(dim),
-        #Reduce('b n c -> b c', 'mean'),
-        #nn.Linear(dim, num_classes)
+        nn.LayerNorm(dim),
+        Reduce('b n c -> b c', 'mean'),
+        nn.Linear(dim, num_classes)
     )

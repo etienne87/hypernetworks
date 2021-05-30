@@ -23,7 +23,7 @@ def make_grid(x):
 
 
 
-def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8, height=128, width=128, viz_every=10, epochs=10, num_workers=2, device='cuda:0'):
+def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8, height=128, width=128, viz_every=10, epochs=10, num_workers=2, device='cuda:0', resume=False):
 
     loader_fn = lambda x:loader(x,width,height)
     dataset = torchvision.datasets.ImageFolder(path, loader=loader_fn)
@@ -34,7 +34,7 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
     std = torch.FloatTensor([0.229, 0.224, 0.225]).to(device)[None,:,None,None]
 
     net = HyperNetwork(3)
-    if os.path.exists(save_path):
+    if os.path.exists(save_path) and resume:
         net.load_state_dict(torch.load(save_path))
 
     net.to(device)
