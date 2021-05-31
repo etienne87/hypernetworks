@@ -80,7 +80,7 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
                     cat = np.concatenate((im_x_in, im_y), axis=1)
 
                     cv2.imshow('res', cat)
-                    cv2.waitKey(5)
+                    cv2.waitKey(0)
 
 
 

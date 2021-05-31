@@ -73,13 +73,13 @@ class DynamicSineLayer(nn.Module):
         y = torch.bmm(coords, weight) + bias
         return torch.sin(y)
 
-    def local_forward_weight_and_biases(self, coords, weights, biases):
+    def local_forward_weight_and_bias(self, coords, weight, bias):
         #coords: [B,N,D]
         #weights: [B,N,D,K]
         #biases: [B,N,K]
         #output: [B,N,K]
-        y = torch.einsum('bnd,bndk->bnk', coords, weights)
-        y = y + biases
+        y = torch.einsum('bnd,bndk->bnk', coords, weight)
+        y = y + bias
         return torch.sin(y)
 
 
@@ -130,7 +130,7 @@ class HyperRenderer(nn.Module):
     def get_biases_total_len(self):
         return sum([item.cout for item in self.layers])
 
-    def forward_weights_and_biases(self, x, field=True):
+    def forward_weights_and_biases(self, x, field):
         assert self.grid is not None
         batch_size = x.shape[0]
         coords = self.grid[None].repeat([batch_size,1,1])
@@ -138,7 +138,10 @@ class HyperRenderer(nn.Module):
         weights, biases = self.get_weights_and_biases(x, field)
 
         for layer, weight, bias in zip(self.layers, weights, biases):
-            coords = layer.forward_weight_and_bias(coords, weight, bias)
+            if field:
+                coords = layer.local_forward_weight_and_bias(coords, weight, bias)
+            else:
+                coords = layer.forward_weight_and_bias(coords, weight, bias)
 
         b,n,d = coords.shape
         x = coords.view(-1,d)
@@ -147,12 +150,18 @@ class HyperRenderer(nn.Module):
         y = y.permute(0,3,1,2).contiguous()
         return y
 
-    def get_weights_and_biases(self, x, field=True):
+    def get_weights_and_biases(self, x, field):
         b = len(x)
+        if field:
+            n = x.shape[1]
         x = torch.split(x, self.weight_sizes+self.bias_sizes, dim=-1)
         weights, biases = x[:len(self.layers)], x[len(self.layers):]
-        weights = [weight.view(b,cin,cout) for weight,(cin,cout) in zip(weights,self.cin_cout)]
-        biases = [bias.unsqueeze(1) for bias in biases]
+        if field:
+            weights = [weight.view(b,n,cin,cout) for weight,(cin,cout) in zip(weights,self.cin_cout)]
+        else:
+            weights = [weight.view(b,cin,cout) for weight,(cin,cout) in zip(weights,self.cin_cout)]
+            biases = [bias.unsqueeze(1) for bias in biases]
+
         return weights, biases
 
 
@@ -160,12 +169,13 @@ class HyperRenderer(nn.Module):
 
 
 class HyperNetwork(nn.Module):
-    def __init__(self, cout=3, field=False):
+    def __init__(self, cout=3, field=True):
         super().__init__()
-        self.hyper = HyperRenderer(3, [256,256,256])
+        self.hyper = HyperRenderer(3, [8,8,8])
         total = self.hyper.get_weights_total_len() + self.hyper.get_biases_total_len()
         self.hypo = MLPMixer(image_size=128, patch_size=16, cin=3, dim=128, num_classes=total, depth=7, do_reduce=not field)
         self.field = field
+        self.patch_size = 16
 
     def forward(self, x, grad=True):
         """
@@ -173,8 +183,18 @@ class HyperNetwork(nn.Module):
         1. do not reduce x! use grid_sample to derive per-coordinate parameters (nearest-neighbor or bilinear)
         2. input coords should perhaps be a fixed fourier feature encoding
         """
+        b,c,h,w = x.shape
         self.hyper.set_size(x)
         x = self.hypo(x)
+        if self.field:
+            p = self.patch_size
+            x = x.reshape(b,h//p,w//p,x.shape[-1])
+            x = x.permute(0,3,1,2)
+            coords = self.hyper.grid[None].repeat([b,1,1])
+            coords = coords.unsqueeze(2)
+            x = F.grid_sample(x, coords, mode='bilinear', align_corners=True).squeeze()
+            x = x.permute(0,2,1)
+
         y = self.hyper.forward_weights_and_biases(x, self.field)
         return y
 
