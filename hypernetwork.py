@@ -173,7 +173,7 @@ class HyperNetwork(nn.Module):
         super().__init__()
         self.hyper = HyperRenderer(3, [8,8,8])
         total = self.hyper.get_weights_total_len() + self.hyper.get_biases_total_len()
-        self.hypo = MLPMixer(image_size=128, patch_size=16, cin=3, dim=128, num_classes=total, depth=7, do_reduce=not field)
+        self.hypo = MLPMixer(image_size=128, patch_size=16, cin=3, dim=128, num_classes=total, depth=5, do_reduce=not field)
         self.field = field
         self.patch_size = 16
 
