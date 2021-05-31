@@ -7,6 +7,7 @@ https://github.com/vsitzmann/siren/
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from torchvision import models
 from mlp_mixer import MLPMixer
 
@@ -54,45 +55,53 @@ class SineLayer(nn.Module):
 
 
 class DynamicSineLayer(nn.Module):
-    def __init__(self, in_features, out_features, in_activations, autofuel=False):
+    def __init__(self, in_features, out_features, is_first=False):
         super().__init__()
         self.cin = in_features
         self.cout = out_features
         self.total_len = self.cin * self.cout
-        self.omega = nn.Parameter(torch.FloatTensor([1]))
-        if autofuel:
-            self.weight = nn.Sequential(nn.Linear(in_activations, 256, bias=True), nn.LeakyReLU(),
-                                         nn.Linear(256, total_len))
-            self.bias = nn.Sequential(nn.Linear(in_activations, 256, bias=True), nn.LeakyReLU(),
-                                         nn.Linear(256, out_features))
+        self.omega_0 = 30.0/in_features if is_first else 1.0*math.sqrt(6.0/in_features)
 
-    def forward_auto_fuel(self, coords, fuel):
-        weight = self.weight(fuel).reshape(len(coords), self.in_features, self.out_features)
-        bias = self.bias(fuel).unsqueeze(1)
-        return self.forward_weight_and_bias(coords, weight, bias)
-
-    def forward_weight_and_bias(self, coords, weight, bias, omega=1):
+    def forward_weight_and_bias(self, coords, weight, bias):
         #coords: [B,N,D]
         #weight: [B,D,K]
+        #bias: [B,1,K]
         #output: [B,N,K]
-        weight = weight * self.omega
+        weight = (weight-weight.min())/(weight.max()-weight.min())
+        weight = weight*2-1
+        weight = weight * self.omega_0
         y = torch.bmm(coords, weight) + bias
         return torch.sin(y)
 
+    def local_forward_weight_and_biases(self, coords, weights, biases):
+        #coords: [B,N,D]
+        #weights: [B,N,D,K]
+        #biases: [B,N,K]
+        #output: [B,N,K]
+        y = torch.einsum('bnd,bndk->bnk', coords, weights)
+        y = y + biases
+        return torch.sin(y)
+
+
+
 
 class HyperRenderer(nn.Module):
-    def __init__(self, in_activations, out_features, hidden_features=[128]*5):
+    def __init__(self, out_features, hidden_features=[128]*5):
         super().__init__()
         self.out_features = out_features
 
         last = 2
         self.layers = []
-        for hidden in hidden_features:
-            self.layers.append(DynamicSineLayer(last, hidden, in_activations))
+        for i, hidden in enumerate(hidden_features):
+            self.layers.append(DynamicSineLayer(last, hidden, is_first=i==0))
             last = hidden
         self.layers = nn.ModuleList(self.layers)
 
         self.final_linear = nn.Linear(hidden_features[-1], out_features)
+        with torch.no_grad():
+            self.final_linear.weight.uniform_(-math.sqrt(6.0 / hidden_features[-1]) / 30,
+                                          math.sqrt(6.0 / hidden_features[-1]) / 30)
+
 
         self.hidden_features = hidden_features
         self.grid = None
@@ -121,27 +130,12 @@ class HyperRenderer(nn.Module):
     def get_biases_total_len(self):
         return sum([item.cout for item in self.layers])
 
-    def forward_fuel(self, fuel):
-        assert self.grid is not None
-        batch_size = fuel.shape[0]
-        coords = self.grid[None].repeat([batch_size,1,1])
-
-        for layer in self.layers:
-            coords = layer.forward_auto_fuel(coords, fuel)
-
-        b,n,d = coords.shape
-        x = coords.view(-1,d)
-        y = self.final_linear(x)
-        y = y.reshape(b,self.height,self.width,self.out_features)
-        y = y.permute(0,3,1,2).contiguous()
-        return y
-
-    def forward_weights_and_biases(self, x):
+    def forward_weights_and_biases(self, x, field=True):
         assert self.grid is not None
         batch_size = x.shape[0]
         coords = self.grid[None].repeat([batch_size,1,1])
 
-        weights, biases = self.get_weights_and_biases(x)
+        weights, biases = self.get_weights_and_biases(x, field)
 
         for layer, weight, bias in zip(self.layers, weights, biases):
             coords = layer.forward_weight_and_bias(coords, weight, bias)
@@ -153,9 +147,9 @@ class HyperRenderer(nn.Module):
         y = y.permute(0,3,1,2).contiguous()
         return y
 
-    def get_weights_and_biases(self, x):
+    def get_weights_and_biases(self, x, field=True):
         b = len(x)
-        x = torch.split(x, self.weight_sizes+self.bias_sizes, dim=1)
+        x = torch.split(x, self.weight_sizes+self.bias_sizes, dim=-1)
         weights, biases = x[:len(self.layers)], x[len(self.layers):]
         weights = [weight.view(b,cin,cout) for weight,(cin,cout) in zip(weights,self.cin_cout)]
         biases = [bias.unsqueeze(1) for bias in biases]
@@ -166,16 +160,22 @@ class HyperRenderer(nn.Module):
 
 
 class HyperNetwork(nn.Module):
-    def __init__(self, cout=3, hyper_hidden=32, hypo_hidden=256, n_layers=2):
+    def __init__(self, cout=3, field=False):
         super().__init__()
-        self.hyper = HyperRenderer(hypo_hidden, 3, [32,64,256,64])
+        self.hyper = HyperRenderer(3, [256,256,256])
         total = self.hyper.get_weights_total_len() + self.hyper.get_biases_total_len()
-        self.hypo = MLPMixer(image_size=128, patch_size=16, cin=3, dim=128, num_classes=total, depth=3)
+        self.hypo = MLPMixer(image_size=128, patch_size=16, cin=3, dim=128, num_classes=total, depth=7, do_reduce=not field)
+        self.field = field
 
-    def forward(self, x):
+    def forward(self, x, grad=True):
+        """
+        TODO:
+        1. do not reduce x! use grid_sample to derive per-coordinate parameters (nearest-neighbor or bilinear)
+        2. input coords should perhaps be a fixed fourier feature encoding
+        """
         self.hyper.set_size(x)
         x = self.hypo(x)
-        y = self.hyper.forward_weights_and_biases(x)
+        y = self.hyper.forward_weights_and_biases(x, self.field)
         return y
 
 

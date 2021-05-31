@@ -20,7 +20,7 @@ def FeedForward(dim, expansion_factor = 4, dropout = 0., dense = nn.Linear):
         # nn.Dropout(dropout)
     )
 
-def MLPMixer(*, image_size, patch_size, cin, dim, depth, num_classes, expansion_factor = 4, dropout = 0., do_reduce=False):
+def MLPMixer(*, image_size, patch_size, cin, dim, depth, num_classes, expansion_factor = 4, dropout = 0., do_reduce=True):
     assert (image_size % patch_size) == 0, 'image must be divisible by patch size'
     num_patches = (image_size // patch_size) ** 2
     chan_first, chan_last = partial(nn.Conv1d, kernel_size = 1), nn.Linear
@@ -33,6 +33,6 @@ def MLPMixer(*, image_size, patch_size, cin, dim, depth, num_classes, expansion_
             PreNormResidual(dim, FeedForward(dim, expansion_factor, dropout, chan_last))
         ) for _ in range(depth)],
         nn.LayerNorm(dim),
-        Reduce('b n c -> b c', 'mean') if do_reduce else lambda x:x,
+        Reduce('b n c -> b c', 'mean') if do_reduce else nn.Identity(),
         nn.Linear(dim, num_classes)
     )
