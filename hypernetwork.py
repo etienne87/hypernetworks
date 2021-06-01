@@ -201,20 +201,12 @@ class HyperNetwork(nn.Module):
         self.hyper = HyperRenderer(18, 3, [16,16,16])
         total = self.hyper.get_weights_total_len() + self.hyper.get_biases_total_len()
         self.hypo = MLPMixer(image_size=128, patch_size=16, cin=3, dim=128, num_classes=total, depth=5, do_reduce=not field)
-        #self.hypo = models.resnet18(pretrained=True)
-        #self.conv = nn.Conv2d(256, total, 1, 1, 0)
 
         self.field = field
         self.patch_size = 16
 
     def forward(self, x, grad=True):
-        """
-        TODO:
-        1. do not reduce x! use grid_sample to derive per-coordinate parameters (nearest-neighbor or bilinear)
-        2. input coords should perhaps be a fixed fourier feature encoding
-        """
         b,c,h,w = x.shape
-        self.hyper.set_size(x)
         x = self.hypo(x)
 
         if self.field:
