@@ -36,7 +36,6 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
     std = torch.FloatTensor([0.229, 0.224, 0.225]).to(device)[None,:,None,None]
 
     net = HyperNetwork(3)
-    #net = HyperNetworkKlozek()
     if os.path.exists(save_path) and resume:
         net.load_state_dict(torch.load(save_path))
 
