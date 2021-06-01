@@ -53,6 +53,20 @@ class SineLayer(nn.Module):
         return y
 
 
+def fourier_encode(x, max_freq, num_bands = 4, base = 2):
+    x = x.unsqueeze(-1)
+    device, dtype, orig_x = x.device, x.dtype, x
+
+    scales = torch.logspace(0., math.log(max_freq / 2) / math.log(base), num_bands, base = base, device = device, dtype = dtype)
+    scales = scales[(*((None,) * (len(x.shape) - 1)), Ellipsis)]
+
+    x = x * scales * math.pi
+    x = torch.cat([x.sin(), x.cos()], dim=-1)
+    x = torch.cat((x, orig_x), dim = -1)
+    return x
+
+
+
 
 class DynamicSineLayer(nn.Module):
     def __init__(self, in_features, out_features, is_first=False):
@@ -86,11 +100,11 @@ class DynamicSineLayer(nn.Module):
 
 
 class HyperRenderer(nn.Module):
-    def __init__(self, out_features, hidden_features=[128]*5):
+    def __init__(self, cin, out_features, hidden_features=[128]*5):
         super().__init__()
         self.out_features = out_features
 
-        last = 2
+        last = cin
         self.layers = []
         for i, hidden in enumerate(hidden_features):
             self.layers.append(DynamicSineLayer(last, hidden, is_first=i==0))
@@ -135,6 +149,7 @@ class HyperRenderer(nn.Module):
         batch_size = x.shape[0]
         coords = self.grid[None].repeat([batch_size,1,1])
 
+        coords = fourier_encode(coords, 128).view(batch_size,-1,2*9)
         weights, biases = self.get_weights_and_biases(x, field)
 
         for layer, weight, bias in zip(self.layers, weights, biases):
@@ -165,15 +180,30 @@ class HyperRenderer(nn.Module):
         return weights, biases
 
 
+class HypoResNet(nn.Module):
+    def __init__(self, total):
+        super().__init__()
+        self.hypo = models.resnet18(pretrained=True)
+        self.conv = nn.Conv2d(256, total, 1, 1, 0)
 
+    def forward(self, x):
+        x = self.hypo.maxpool(self.hypo.relu(self.hypo.bn1(self.hypo.conv1(x))))
+        x = self.hypo.layer1(x)
+        x = self.hypo.layer2(x)
+        x = self.hypo.layer3(x)
+        x = self.conv(x)
+        return x
 
 
 class HyperNetwork(nn.Module):
     def __init__(self, cout=3, field=True):
         super().__init__()
-        self.hyper = HyperRenderer(3, [8,8,8])
+        self.hyper = HyperRenderer(18, 3, [16,16,16])
         total = self.hyper.get_weights_total_len() + self.hyper.get_biases_total_len()
         self.hypo = MLPMixer(image_size=128, patch_size=16, cin=3, dim=128, num_classes=total, depth=5, do_reduce=not field)
+        #self.hypo = models.resnet18(pretrained=True)
+        #self.conv = nn.Conv2d(256, total, 1, 1, 0)
+
         self.field = field
         self.patch_size = 16
 
@@ -186,15 +216,15 @@ class HyperNetwork(nn.Module):
         b,c,h,w = x.shape
         self.hyper.set_size(x)
         x = self.hypo(x)
+
         if self.field:
             p = self.patch_size
             x = x.reshape(b,h//p,w//p,x.shape[-1])
             x = x.permute(0,3,1,2)
             coords = self.hyper.grid[None].repeat([b,1,1])
             coords = coords.unsqueeze(2)
-            x = F.grid_sample(x, coords, mode='bilinear', align_corners=True).squeeze()
+            x = F.grid_sample(x, coords, mode='nearest', align_corners=True).squeeze()
             x = x.permute(0,2,1)
-
         y = self.hyper.forward_weights_and_biases(x, self.field)
         return y
 
