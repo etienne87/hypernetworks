@@ -35,7 +35,7 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
     mean = torch.FloatTensor([0.485, 0.456, 0.406]).to(device)[None,:,None,None]
     std = torch.FloatTensor([0.229, 0.224, 0.225]).to(device)[None,:,None,None]
 
-    net = HyperNetwork(3)
+    net = HyperNetwork(3, img_size=width)
     if os.path.exists(save_path) and resume:
         net.load_state_dict(torch.load(save_path))
 
@@ -43,7 +43,6 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
     optim = torch.optim.AdamW(net.parameters(), lr)
 
     for epoch in range(epochs):
-        torch.save(net.state_dict(), save_path)
 
         with tqdm.tqdm(dataloader, total=len(dataloader)) as tq:
             for i, (x, _) in enumerate(tq):
@@ -57,7 +56,7 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
                 optim.zero_grad()
                 y = net(x_net)
                 loss = torch.nn.functional.smooth_l1_loss(x_in, y)
-                # loss += kornia.losses.ssim(x_in, y)
+                loss += kornia.losses.ssim(x_in, y, 5, reduction='mean')
                 loss.backward()
                 optim.step()
 
@@ -76,6 +75,8 @@ def main(path, save_path='hyper.ckpt', lr=0.001, batch_size=32, viz_batch_size=8
 
                     cv2.imshow('res', cat)
                     cv2.waitKey(5)
+
+        torch.save(net.state_dict(), save_path)
 
 
 

@@ -9,7 +9,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from torchvision import models
-from mlp_mixer import MLPMixer
+from mlp_mixer import MLPMixer, MLPUnMixer
+
+
+import cv2
+import numpy as np
+from torchvision.utils import make_grid
+
+def my_make_grid(tensor):
+    batch_size = len(tensor)
+    nrows = 2 ** ((batch_size.bit_length() - 1) // 2)
+    return make_grid(tensor, nrow=nrows, padding=4, normalize=True).permute(1,2,0).contiguous().cpu().numpy()
+
+def colorize(img):
+    return cv2.applyColorMap((img*255).astype(np.uint8), cv2.COLORMAP_JET)
+
+def viz_coords(coords, height, width, name='coords.jpg'):
+    coords = coords.view(height,width,coords.shape[-1])
+    coords = coords.permute(2,0,1)[:,None].contiguous()
+    grid = my_make_grid(coords)
+    grid = colorize(grid)
+    cv2.imwrite(name, grid)
 
 
 def get_mgrid(dims):
@@ -28,8 +48,9 @@ class SineLayer(nn.Module):
 
         self.in_features = in_features
         self.linear = nn.Linear(in_features, out_features, bias=bias)
-
         self.init_weights()
+        self.cin = in_features
+        self.cout = out_features
 
     def init_weights(self):
         with torch.no_grad():
@@ -53,7 +74,7 @@ class SineLayer(nn.Module):
         return y
 
 
-def fourier_encode(x, max_freq, num_bands = 4, base = 2):
+def fourier_encode(x, max_freq, num_bands = 8, base = 2):
     x = x.unsqueeze(-1)
     device, dtype, orig_x = x.device, x.dtype, x
 
@@ -62,7 +83,9 @@ def fourier_encode(x, max_freq, num_bands = 4, base = 2):
 
     x = x * scales * math.pi
     x = torch.cat([x.sin(), x.cos()], dim=-1)
-    x = torch.cat((x, orig_x), dim = -1)
+
+    c,d = x.shape[-2:]
+    x = x.view(len(x), c*d)
     return x
 
 
@@ -97,11 +120,12 @@ class DynamicSineLayer(nn.Module):
 
 
 class HyperRenderer(nn.Module):
-    def __init__(self, cin, out_features, hidden_features=[128]*5):
+    def __init__(self, cin, out_features, hidden_features=[128]*5, patch_size=8):
         super().__init__()
         self.out_features = out_features
 
-        last = cin
+        last = 32
+        #self.first_layer = SineLayer(cin, last, is_first=True)
         self.layers = []
         for i, hidden in enumerate(hidden_features):
             self.layers.append(DynamicSineLayer(last, hidden))
@@ -109,15 +133,17 @@ class HyperRenderer(nn.Module):
 
         #add fixed sirens
         self.fixed_layers = nn.ModuleList()
-        for i in range(3):
-            self.fixed_layers.append(SineLayer(hidden, hidden))
+        for i in range(2):
+            hidden = 64
+            self.fixed_layers.append(SineLayer(last, hidden))
+            last = hidden
 
         self.layers = nn.ModuleList(self.layers)
 
-        self.final_linear = nn.Linear(hidden_features[-1], out_features)
+        self.final_linear = nn.Linear(last, out_features)
         with torch.no_grad():
-            self.final_linear.weight.uniform_(-math.sqrt(6.0 / hidden_features[-1]) / 30,
-                                          math.sqrt(6.0 / hidden_features[-1]) / 30)
+            self.final_linear.weight.uniform_(-math.sqrt(6.0 / last) / 30,
+                                               math.sqrt(6.0 / last) / 30)
 
 
         self.hidden_features = hidden_features
@@ -126,14 +152,24 @@ class HyperRenderer(nn.Module):
         self.cin_cout = self.get_cin_cout()
         self.weight_sizes = [a*b for a,b in self.cin_cout]
         self.bias_sizes = [b for a,b in self.cin_cout]
+        self.patch_size = patch_size
 
     def set_size(self, x):
         height, width = x.shape[-2:]
         if self.grid is not None and self.grid.shape[-2:] == (height,width):
             return
-        self.grid = get_mgrid([height,width]).to(x)
+        p = self.patch_size
+        self.grid = get_mgrid([width,height]).to(x)
         self.height = height
         self.width = width
+
+    def modulo_patch_size(self, coords):
+        scale = torch.FloatTensor([self.width,self.height])[None,None,:]
+        scale = scale.to(coords)
+        coords = coords * scale
+        coords = coords.long()%self.patch_size
+        coords = coords.float() / self.patch_size
+        return coords
 
     def get_cin_cout(self):
         self.cin_cout = []
@@ -150,11 +186,17 @@ class HyperRenderer(nn.Module):
     def forward_weights_and_biases(self, x, field):
         assert self.grid is not None
         batch_size = x.shape[0]
-        coords = self.grid[None].repeat([batch_size,1,1])
 
-        coords = fourier_encode(coords, 512)
-        c,d = coords.shape[-2:]
-        coords = coords.view(batch_size, -1, c*d)
+        coords = self.grid
+        #coords = self.modulo_patch_size(coords)
+        #coords = self.first_layer(coords)
+        coords = fourier_encode(coords, 1024)
+        #viz_coords(coords, self.height, self.width)
+
+        if coords.ndim == 2:
+            coords = coords[None]
+        coords = coords.repeat([batch_size,1,1])
+
         weights, biases = self.get_weights_and_biases(x, field)
 
         for layer, weight, bias in zip(self.layers, weights, biases):
@@ -203,9 +245,9 @@ class HypoResNet(nn.Module):
         return x
 
 class HypoMLPMixer(nn.Module):
-    def __init__(self, image_size, total, patch_size=16):
+    def __init__(self, image_size, total, patch_size):
         super().__init__()
-        self.hypo = MLPMixer(image_size=image_size, patch_size=patch_size, cin=3, dim=128, num_classes=total, depth=5, do_reduce=False)
+        self.hypo = MLPMixer(image_size=image_size, patch_size=patch_size, cin=3, dim=256, num_classes=total, depth=5, do_reduce=False)
         self.patch_size = patch_size
 
     def forward(self, x):
@@ -219,12 +261,12 @@ class HypoMLPMixer(nn.Module):
 
 
 class HyperNetwork(nn.Module):
-    def __init__(self, cout=3, field=True):
+    def __init__(self, cout=3, field=True, img_size=128):
         super().__init__()
-        self.hyper = HyperRenderer(18, 3, [16])
+        self.hyper = HyperRenderer(2, 3, [8,8], patch_size=16)
         total = self.hyper.get_weights_total_len() + self.hyper.get_biases_total_len()
         #self.hypo = HypoResNet(total)
-        self.hypo = HypoMLPMixer(image_size=128, total=total, patch_size=16)
+        self.hypo = HypoMLPMixer(image_size=img_size, total=total, patch_size=16)
         self.field = field
 
     def forward(self, x, grad=True):
